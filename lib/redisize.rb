@@ -16,6 +16,9 @@ module Redisize
    module ORM
       autoload :ActiveRecord, File.join(__dir__, 'redisize/orm/active_record.rb')
    end
+   module Support
+      autoload :Enumerable, File.join(__dir__, 'redisize/support/enumerable.rb')
+   end
 
    class << self
       attr_writer :adapter
@@ -30,6 +33,10 @@ module Redisize
          ActiveRecord: 'active_record'
       }
 
+      SUPPORTS = {
+         Enumerable: 'enumerable'
+      }
+
       LOGS = {
          Rails: 'rails'
       }
@@ -42,10 +49,11 @@ module Redisize
       def included kls
          kls.extend(Redisize::ClassMethods)
 
-         # init orm, log, and cache
+         # init orm, log, cache, and support classes
          init_orm_for(kls)
          init_log_for(kls)
          init_cache_for(kls)
+         init_support_for(kls)
       end
 
       def init_orm_for kls
@@ -54,6 +62,17 @@ module Redisize
          if orm
             require("redisize/orm/#{ORMS[orm]}")
             kls.include(Redisize::ORM.const_get(orm))
+         end
+      end
+
+      def init_support_for kls
+         sup = Object.constants.reduce(nil) { |res, anc| res || SUPPORTS.keys.find {|re| /#{re}/ =~ anc.to_s } }
+
+         if sup
+            require("redisize/support/#{SUPPORTS[sup]}")
+            cls = sup.to_s.constantize
+            cls.include(Redisize::Support.const_get(sup))
+            cls.include(Redisize::ClassMethods)
          end
       end
 
@@ -75,6 +94,7 @@ module Redisize
             require("redisize/cache/#{CACHES[cache]}")
             Redisize.include(Redisize::Cache.const_get(cache))
             Redisize.extend(Redisize::Cache.const_get(cache))
+            Enumerable.include(Redisize::Cache.const_get(cache))
             kls.extend(Redisize::Cache.const_get(cache))
          end
       end
@@ -185,9 +205,9 @@ module Redisize
          assign_reverse_key(metakey, key)
       end
 
-      # +redisize_sql_metas+ updates all the meta keys for the result value
+      # +redisize_array_metas+ updates all the meta keys for the result array value
       #
-      def redisize_sql_metas key, attres
+      def redisize_array_metas key, attres
          model_name = key[1]
          primary_key = key[2]
 
@@ -296,15 +316,48 @@ module Redisize
          end
       end
 
+      def primary_key_with key_name_in = nil
+        key_name_in || self.respond_to?(:primary_key) && self.primary_key || case self
+            when ActiveRecord
+               self.map.first&.class&.primary_key
+            when ActiveRecord::Scoping, ActiveRecord::Reflection, ActiveRecord::Associations
+               self.values.map.first&.class&.primary_key
+            end
+      end
+
       # self -> model class
       def redisize_sql &block
          key = ["sql", self.name, self.primary_key, self.all.to_sql]
 
+         redisize_by_key(key, &block)
+      end
+
+      # self -> model class
+      def redisize_hash key_name_in = nil, &block
+         key_name = primary_key_with(key_name_in)
+
+         key = ["by_key", *self.values.map do |x|
+            key_name && x.respond_to?(key_name) ? x.send(key_name).to_s : x.to_s
+         end ]
+
+         redisize_by_key(key, &block)
+      end
+
+      # self -> model class
+      def redisize_array key_name_in = nil, &block
+         key_name = primary_key_with(key_name_in)
+
+         key = ["by_key", *self.map { |x| key_name ? x.send(key_name).to_s : x.to_s } ]
+
+         redisize_by_key(key, &block)
+      end
+
+      def redisize_by_key key, &block
          # binding.pry
          redisize_cache_fetch(key, expires_in: 1.day) do
             value = block.call
 
-            Redisize.enqueue(:redisize_sql_metas, key, value)
+            Redisize.enqueue(:redisize_array_metas, key, value)
 
             value
          end
