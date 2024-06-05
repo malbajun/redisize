@@ -357,7 +357,7 @@ module Redisize
          redisize_cache_fetch(key, expires_in: 1.day) do
             value = block.call
 
-            Redisize.enqueue(:redisize_array_metas, key, value)
+            Redisize.enqueue(:redisize_array_metas, key, value) if value.is_a?(Array)
 
             value
          end
